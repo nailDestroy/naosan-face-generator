@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>なおさん表情ジェネレータ</title>
+<style>
+body {
+	margin: 0;
+	overflow: hidden;
+}
+
+#ui {
+	position: absolute;
+	top: 10px;
+	left: 10px;
+	background: #fff;
+	padding: 10px;
+	max-height: 90vh;
+	overflow-y: auto;
+}
+
+.category {
+	margin-bottom: 10px;
+	border: 1px solid #ccc;
+	padding: 5px;
+}
+
+.category>h3 {
+	margin: 0;
+	cursor: pointer;
+	user-select: none;
+}
+
+.category .sliders {
+	display: none;
+	margin-top: 5px;
+}
+
+label {
+	display: block;
+	margin-bottom: 5px;
+}
+
+/* リセットボタン */
+#resetBtn {
+	position: absolute;
+	top: 20px;
+	right: 20px;
+	z-index: 10;
+	padding: 5px 10px;
+}
+
+#randomBtn {
+	position: absolute;
+	top: 20px;
+	right: 140px; /* リセットボタンの幅 + 間隔分 */
+	z-index: 10;
+	padding: 5px 10px;
+}
+
+/* 現在値表示 */
+#currentValues {
+	position: absolute;
+	top: 60px;
+	right: 20px;
+	max-width: 200px;
+	background: #f0f0f0;
+	padding: 5px;
+	font-size: 14px;
+	white-space: pre-line;
+}
+
+/*キャプチャボタン*/
+#captureBtn {
+	position: absolute;
+	bottom: 120px; /* リセット: 20px, Twitter: 180px の間に配置 */
+	right: 20px;
+	z-index: 10;
+	padding: 5px 10px;
+}
+
+/* Twitterボタン */
+#shareButton {
+	position: absolute;
+	bottom: 40px;
+	right: 20px;
+	background-color: #1DA1F2;
+	color: white;
+	border: none;
+	padding: 10px 20px;
+	font-size: 30px;
+	cursor: pointer;
+	border-radius: 5px;
+}
+
+#shareButton:hover {
+	background-color: #0d95e8;
+}
+
+#shareButton:active {
+	background-color: #0a7bbf;
+}
+</style>
+</head>
+<body>
+
+	<div id="ui"></div>
+	<button id="resetBtn">表情リセット</button>
+	<div id="currentValues"></div>
+	<button id="captureBtn">キャプチャ保存</button>
+	<button id="shareButton">Twitterでシェア</button>
+	<button id="randomBtn">ランダム表情</button>
+
+	<script type="module">
+import * as THREE from "https://esm.sh/three@0.173.0";
+import { GLTFLoader } from "https://esm.sh/three@0.173.0/examples/jsm/loaders/GLTFLoader.js";
+import { VRM, VRMLoaderPlugin, VRMUtils } from "https://esm.sh/@pixiv/three-vrm@3.4.2?deps=three@0.173.0";
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(15, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(0, 1.5, 3);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// DirectionalLight（影も出したい場合）
+const light = new THREE.DirectionalLight(0xffffff, 1);
+light.position.set(0, 1.5, 1);       // カメラより手前に配置
+light.target.position.set(0, 1.5, 0); // 顔の方向を向く
+scene.add(light);
+scene.add(light.target);
+
+// PointLight（顔全体を柔らかく照らす）
+const pointLight = new THREE.PointLight(0xffffff, 1);
+pointLight.position.set(0, 1.5, 1); // 顔の前
+scene.add(pointLight);
+
+const loader = new GLTFLoader();
+loader.register(parser => new VRMLoaderPlugin(parser));
+
+let vrm;
+let isVRM1 = false;
+const ui = document.getElementById("ui");
+const currentValuesDiv = document.getElementById("currentValues");
+
+// カテゴリルール
+const categories = {
+    "目": ["まばたき","ウィンク","ｳｨﾝｸ","瞳","目","なぬ","はぅ","ねる","びっくり","笑い","あおり","なごみ"],
+    "口": ["口","あ","い","う","え","お","vrc.v_","ちぇっ","とじ","むくれる","むっ","よだれ","横長","焦り","ω","ω□","ω中","ω大","ω大_ドヤ","∧","▲","はんっ！","ぺろっ","歯","にやり","舌"],
+    "頬": ["ほっぺ","頬染め","青ざめ"],
+    "涙": ["涙","左上","右上","左下","右下"],
+    "眉毛": ["怒り","困る","上","下","真面目","にこり"]
+};
+const classificationPriority = ["削除予定","口","涙", "眉毛", "目",  "頬"];
+const uiOrder = ["眉毛", "目", "口", "頬", "涙"];
+
+loader.load("/models/Na0_6.vrm", (gltf) => {
+    vrm = gltf.userData.vrm;
+    VRMUtils.combineSkeletons(vrm.scene);
+    scene.add(vrm.scene);
+
+    const extensions = gltf.parser.json.extensionsUsed || [];
+    if (extensions.includes("VRMC_vrm")) isVRM1 = true;
+    else if (extensions.includes("VRM")) isVRM1 = false;
+
+    const meshes = ["Body","Body_1","Body_2","Body_3","Body_4","Body_5","Body_6"];
+    const blendShapeNames = new Set();
+    meshes.forEach(meshName => {
+        const mesh = vrm.scene.getObjectByName(meshName);
+        if (mesh?.morphTargetDictionary) Object.keys(mesh.morphTargetDictionary).forEach(name => blendShapeNames.add(name));
+    });
+
+    const assignedNames = new Set();
+    const categoryContainers = {};
+    const sliderElements = {}; // スライダー要素を保存
+
+    // UI生成
+    uiOrder.forEach(catName => {
+        const categoryDiv = document.createElement("div");
+        categoryDiv.className = "category";
+
+        const h3 = document.createElement("h3");
+        h3.textContent = catName;
+        categoryDiv.appendChild(h3);
+
+        const slidersDiv = document.createElement("div");
+        slidersDiv.className = "sliders";
+        categoryDiv.appendChild(slidersDiv);
+
+        h3.addEventListener("click", () => {
+            slidersDiv.style.display = slidersDiv.style.display === "none" ? "block" : "none";
+        });
+
+        categoryContainers[catName] = slidersDiv;
+        ui.appendChild(categoryDiv);
+    });
+
+    // その他
+    const otherDiv = document.createElement("div");
+    otherDiv.className = "category";
+    const otherH3 = document.createElement("h3");
+    otherH3.textContent = "その他";
+    otherDiv.appendChild(otherH3);
+    const otherSliders = document.createElement("div");
+    otherSliders.className = "sliders";
+    otherDiv.appendChild(otherSliders);
+    otherH3.addEventListener("click", () => {
+        otherSliders.style.display = otherSliders.style.display === "none" ? "block" : "none";
+    });
+    ui.appendChild(otherDiv);
+
+
+const exceptionCategoryMap = {
+    "丸目_涙": "目",
+	"丸目_涙2": "目",
+    // 必要ならここに追加
+};
+
+    // スライダー生成
+blendShapeNames.forEach(name => {
+    if (assignedNames.has(name)) return;
+
+    // まず例外マップでカテゴリを決定
+    let assignedCategory = exceptionCategoryMap[name];
+
+    const toDelete = ["にっこり", "頬染め_A","頬染め_B","とじる肌"];
+    if (!assignedCategory) {  // 例外マップに無ければ通常ルール
+        if (toDelete.includes(name)) assignedCategory = "削除予定";
+        else {
+            for (const catName of classificationPriority) {
+                const keywords = categories[catName];
+                if (keywords && keywords.includes(name)) { assignedCategory = catName; break; }
+            }
+            // 名前にキーワードが含まれる場合
+            if (!assignedCategory || assignedCategory === "その他") {
+                for (const catName of classificationPriority) {
+                    const keywords = categories[catName];
+                    if (keywords && keywords.some(kw => name.includes(kw))) { assignedCategory = catName; break; }
+                }
+            }
+        }
+    }
+
+    // 最後に決まらなければ "その他"
+    if (!assignedCategory) assignedCategory = "その他";
+
+    assignedNames.add(name);
+
+    if (assignedCategory !== "削除予定") {
+        const label = document.createElement("label");
+        label.textContent = name;
+        const input = document.createElement("input");
+        input.type = "range";
+        input.min = 0;
+        input.max = 1;
+        input.step = 0.01;
+        input.value = 0;
+        label.appendChild(input);
+
+        // スライダー変更時にVRM更新＆現在値表示更新
+        input.addEventListener("input", e => {
+            const val = parseFloat(e.target.value);
+            meshes.forEach(meshName => {
+                const mesh = vrm.scene.getObjectByName(meshName);
+                if (!mesh || !mesh.morphTargetDictionary || !mesh.morphTargetInfluences) return;
+                const index = mesh.morphTargetDictionary[name];
+                if (index !== undefined) mesh.morphTargetInfluences[index] = val;
+            });
+            if (isVRM1 && vrm.expressionManager && vrm.expressionManager.expressions[name]) {
+                vrm.expressionManager.setValue(name, val);
+                vrm.expressionManager.update();
+            }
+            updateCurrentValues();
+        });
+
+        const container = categoryContainers[assignedCategory] || otherSliders;
+        container.appendChild(label);
+
+        sliderElements[name] = input; // 保存
+    }
+});
+
+    // 現在値更新関数
+    function updateCurrentValues() {
+        const texts = [];
+        for (const [name, input] of Object.entries(sliderElements)) {
+            const val = parseFloat(input.value);
+            if (val > 0) texts.push(`${name}: ${val.toFixed(2)}`);
+        }
+        currentValuesDiv.textContent = texts.join("\n");
+    }
+
+    // リセットボタン
+    document.getElementById("resetBtn").addEventListener("click", () => {
+        for (const input of Object.values(sliderElements)) input.value = 0;
+        meshes.forEach(meshName => {
+            const mesh = vrm.scene.getObjectByName(meshName);
+            if (!mesh || !mesh.morphTargetInfluences) return;
+            Object.keys(mesh.morphTargetDictionary).forEach(name => {
+                const index = mesh.morphTargetDictionary[name];
+                if (index !== undefined) mesh.morphTargetInfluences[index] = 0;
+ updateCurrentValues();
+            });
+        });
+        if (isVRM1 && vrm.expressionManager) vrm.expressionManager.resetAll();
+        setTimeout(updateCurrentValues, 50);
+    });
+
+//キャプチャボタン
+document.getElementById("captureBtn").addEventListener("click", () => {
+    renderer.render(scene, camera);
+    const dataURL = renderer.domElement.toDataURL("image/png");
+    const a = document.createElement("a");
+    a.href = dataURL;
+    a.download = "naosan_capture.png";
+    a.click();
+});
+
+
+    // Twitterボタン
+    document.getElementById("shareButton").addEventListener("click", () => {
+        const texts = [];
+        for (const [name, input] of Object.entries(sliderElements)) {
+            const val = parseFloat(input.value);
+            if (val > 0) texts.push(`${name}: ${val.toFixed(2)}`);
+        }
+        const tweetText = "🌱なおさん表情ジェネレータで作成しました！🌱\n\n【レシピ】\n" + texts.join("\n");
+        const tweetUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(tweetText)}`;
+        window.open(tweetUrl, "_blank", "width=550,height=420");
+    });
+
+// ランダム表情ボタン
+document.getElementById("randomBtn").addEventListener("click", () => {
+
+// --- まずリセット ---
+    for (const input of Object.values(sliderElements)) input.value = 0;
+    const meshes = ["Body","Body_1","Body_2","Body_3","Body_4","Body_5","Body_6"];
+    meshes.forEach(meshName => {
+        const mesh = vrm.scene.getObjectByName(meshName);
+        if (!mesh || !mesh.morphTargetInfluences) return;
+        Object.keys(mesh.morphTargetDictionary).forEach(name => {
+            const index = mesh.morphTargetDictionary[name];
+            if (index !== undefined) mesh.morphTargetInfluences[index] = 0;
+        });
+    });
+
+    const targetCategories = ["眉毛", "目", "口", "頬", "涙"];
+	const excludeList = ["瞳大", "目なし","白目","丸目2","瞳小"]
+
+    targetCategories.forEach(randomCategory => {
+        // 選んだカテゴリ内のスライダーを取得
+        const slidersInCategory = [];
+        for (const [name, input] of Object.entries(sliderElements)) {
+            const parentDiv = input.closest(".sliders");
+            if (parentDiv && parentDiv.parentElement.querySelector("h3").textContent === randomCategory && !excludeList.includes(name)) {
+                slidersInCategory.push(input);
+            }
+        }
+
+        if (slidersInCategory.length === 0) return;
+
+        // ランダムに1つ選んでON（値1に）
+        const randomSlider = slidersInCategory[Math.floor(Math.random() * slidersInCategory.length)];
+        randomSlider.value = 1;
+
+        // VRMに反映
+        const name = randomSlider.parentElement.textContent;
+        const val = parseFloat(randomSlider.value);
+        const meshes = ["Body","Body_1","Body_2","Body_3","Body_4","Body_5","Body_6"];
+        meshes.forEach(meshName => {
+            const mesh = vrm.scene.getObjectByName(meshName);
+            if (!mesh || !mesh.morphTargetDictionary || !mesh.morphTargetInfluences) return;
+            const index = mesh.morphTargetDictionary[name];
+            if (index !== undefined) mesh.morphTargetInfluences[index] = val;
+        });
+        if (isVRM1 && vrm.expressionManager && vrm.expressionManager.expressions[name]) {
+            vrm.expressionManager.setValue(name, val);
+            vrm.expressionManager.update();
+        }
+    });
+
+    // 現在値表示も更新
+    updateCurrentValues();
+});
+
+});
+
+window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+function animate() {
+    requestAnimationFrame(animate);
+    if (vrm) vrm.update(0.016);
+    renderer.render(scene, camera);
+}
+animate();
+</script>
+
+</body>
+</html>
